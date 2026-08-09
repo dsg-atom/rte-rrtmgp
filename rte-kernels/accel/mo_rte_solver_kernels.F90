@@ -57,7 +57,7 @@ contains
                               incident_flux,    &
                               flux_up, flux_dn, &
                               do_broadband, broadband_up, broadband_dn, &
-                              do_Jacobians, sfc_srcJac, flux_upJac,               &
+                              do_Jacobians, sfc_srcJac, broadband_upJac, flux_upJac, &
                               do_rescaling, ssa, g)
     integer,                               intent(in   ) :: ncol, nlay, ngpt ! Number of columns, layers, g-points
     logical(wl),                           intent(in   ) :: top_at_1
@@ -84,7 +84,8 @@ contains
     real(wp), dimension(ncol,nlay+1     ), intent(  out) :: broadband_up, broadband_dn ! Spectrally-integrated fluxes [W/m2]
     logical(wl),                           intent(in   ) :: do_Jacobians
     real(wp), dimension(ncol       ,ngpt), intent(in   ) :: sfc_srcJac    ! surface temperature Jacobian of surface source function [W/m2/K]
-    real(wp), dimension(ncol,nlay+1     ), intent(  out) :: flux_upJac    ! surface temperature Jacobian of Radiances [W/m2-str / K]
+    real(wp), dimension(ncol,nlay+1     ), intent(  out) :: broadband_upJac ! Spectrally-integrated surface temperature Jacobian [W/m2-str / K]
+    real(wp), dimension(ncol,nlay+1,ngpt), intent(  out) :: flux_upJac      ! surface temperature Jacobian of Radiances [W/m2-str / K]
     logical(wl),                           intent(in   ) :: do_rescaling
     real(wp), dimension(ncol,nlay  ,ngpt), intent(in   ) :: ssa, g    ! single-scattering albedo, asymmetry parameter
     ! -------------------------------------------------------------------------------------------------
@@ -233,10 +234,24 @@ contains
       !$omp target exit data map(from:flux_dn,flux_up)
     end if
     !
-    ! Only broadband-integrated Jacobians are provided
+    ! Jacobians: the per-g-point Jacobian gpt_Jac has already been computed above.
+    !   Emit it the same way the fluxes are handled: reduce to the broadband Jacobian
+    !   when do_broadband, otherwise scale and return the spectrally-resolved Jacobian.
     !
     if (do_Jacobians) then
-      call sum_broadband_factor(ncol, nlay+1, ngpt, pi * weight, gpt_Jac, flux_upJac)
+      if (do_broadband) then
+        call sum_broadband_factor(ncol, nlay+1, ngpt, pi * weight, gpt_Jac, broadband_upJac)
+      else
+        !$acc                         parallel loop gang vector collapse(3) present(flux_upJac, gpt_Jac)
+        !$omp target teams distribute parallel do simd          collapse(3)
+        do igpt = 1, ngpt
+          do ilev = 1, nlay+1
+            do icol = 1, ncol
+              flux_upJac(icol, ilev, igpt) = pi * weight * gpt_Jac(icol, ilev, igpt)
+            end do
+          end do
+        end do
+      end if
     end if
 
     !$acc        end data
@@ -261,7 +276,7 @@ contains
                                         inc_flux,                   &
                                         flux_up, flux_dn,           &
                                         do_broadband, broadband_up, broadband_dn, &
-                                        do_Jacobians, sfc_srcJac, flux_upJac,               &
+                                        do_Jacobians, sfc_srcJac, broadband_upJac, flux_upJac, &
                                         do_rescaling, ssa, g) bind(C, name="rte_lw_solver_noscat")
     integer,                               intent(in   ) :: ncol, nlay, ngpt ! Number of columns, layers, g-points
     logical(wl),                           intent(in   ) :: top_at_1
@@ -288,6 +303,9 @@ contains
     real(wp), dimension(ncol       ,ngpt), intent(in   ) :: sfc_srcJac
                                                             ! surface temperature Jacobian of surface source function [W/m2/K]
     real(wp), dimension(ncol,nlay+1     ), target, &
+                                           intent(  out) :: broadband_upJac
+                                                            ! Spectrally-integrated surface temperature Jacobian [W/m2-str / K]
+    real(wp), dimension(ncol,nlay+1,ngpt), target, &
                                            intent(  out) :: flux_upJac
                                                             ! surface temperature Jacobian of Radiances [W/m2-str / K]
     logical(wl),                           intent(in   ) :: do_rescaling
@@ -296,8 +314,8 @@ contains
     !
     ! Local variables
     !
-    real(wp), dimension(:,:,:), pointer :: this_flux_up,      this_flux_dn
-    real(wp), dimension(:,:),   pointer :: this_broadband_up, this_broadband_dn, this_flux_upJac
+    real(wp), dimension(:,:,:), pointer :: this_flux_up,      this_flux_dn,      this_flux_upJac
+    real(wp), dimension(:,:),   pointer :: this_broadband_up, this_broadband_dn, this_broadband_upJac
     integer :: icol, ilev, igpt, imu
     ! ------------------------------------
 
@@ -307,8 +325,8 @@ contains
     !$omp target data map(from:flux_up, flux_dn)             if (.not. do_broadband)
     !$acc        data copyout( broadband_up, broadband_dn)   if (      do_broadband)
     !$omp target data map(from:broadband_up, broadband_dn)   if (      do_broadband)
-    !$acc        data copyin(sfc_srcJac)   copyout(flux_upJac) if (do_Jacobians)
-    !$omp target data map(to:sfc_srcJac), map(from:flux_upJac) if (do_Jacobians)
+    !$acc        data copyin(sfc_srcJac) copyout(broadband_upJac, flux_upJac) if (do_Jacobians)
+    !$omp target data map(to:sfc_srcJac) map(from:broadband_upJac, flux_upJac) if (do_Jacobians)
 
     if(do_broadband) then
       this_broadband_up => broadband_up
@@ -329,7 +347,7 @@ contains
                           inc_flux,         &
                           this_flux_up, this_flux_dn, &
                           do_broadband, this_broadband_up, this_broadband_dn, &
-                          do_Jacobians, sfc_srcJac, flux_upJac,     &
+                          do_Jacobians, sfc_srcJac, broadband_upJac, flux_upJac, &
                           do_rescaling, ssa, g)
     !$acc end data
     !$omp end target data
@@ -347,15 +365,18 @@ contains
       end if
 
       if(do_Jacobians) then
-        allocate(this_flux_upJac(ncol,nlay+1))
+        allocate(this_broadband_upJac(ncol,nlay+1), this_flux_upJac(ncol,nlay+1,ngpt))
       else
-        this_flux_upJac => flux_upJac
+        this_broadband_upJac => broadband_upJac
+        this_flux_upJac       => flux_upJac
       end if
       !
       ! For more than one angle use local arrays
       !
       !$acc        data create(   this_broadband_up, this_broadband_dn, this_flux_up, this_flux_dn)
       !$omp target data map(alloc:this_broadband_up, this_broadband_dn, this_flux_up, this_flux_dn)
+      !$acc        data create(   this_broadband_upJac, this_flux_upJac) if(do_Jacobians)
+      !$omp target data map(alloc:this_broadband_upJac, this_flux_upJac) if(do_Jacobians)
       do imu = 2, nmus
         call lw_solver_noscat_oneangle(ncol, nlay, ngpt, &
                               top_at_1, Ds(:,:,imu), weights(imu), tau, &
@@ -363,7 +384,7 @@ contains
                               inc_flux,         &
                               this_flux_up,  this_flux_dn, &
                               do_broadband, this_broadband_up, this_broadband_dn, &
-                              do_Jacobians, sfc_srcJac, this_flux_upJac,         &
+                              do_Jacobians, sfc_srcJac, this_broadband_upJac, this_flux_upJac, &
                               do_rescaling, ssa, g)
         if(do_broadband) then
           call add_arrays(ncol, nlay+1, this_broadband_up, broadband_up)
@@ -373,9 +394,15 @@ contains
           call add_arrays(ncol, nlay+1, ngpt, flux_dn, this_flux_dn)
         end if
         if (do_Jacobians) then
-          call add_arrays(ncol, nlay+1, this_flux_upJac, flux_upJac)
+          if (do_broadband) then
+            call add_arrays(ncol, nlay+1,       this_broadband_upJac, broadband_upJac)
+          else
+            call add_arrays(ncol, nlay+1, ngpt, this_flux_upJac,      flux_upJac)
+          end if
         end if
       end do
+      !$acc end data
+      !$omp end target data
       !$acc end data
       !$omp end target data
     end if
@@ -397,7 +424,7 @@ contains
       deallocate(this_flux_up, this_flux_dn)
     end if
     if (nmus > 1 .and. do_Jacobians) then
-      deallocate(this_flux_upJac)
+      deallocate(this_broadband_upJac, this_flux_upJac)
     end if
   end subroutine lw_solver_noscat
   ! -------------------------------------------------------------------------------------------------
