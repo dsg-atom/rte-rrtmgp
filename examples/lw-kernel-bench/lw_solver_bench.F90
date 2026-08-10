@@ -10,8 +10,12 @@
 !   It exercises do_Jacobians=.true. with do_broadband=.false., i.e. the g-point flux_upJac
 !   path that GEOS uses via reduce() -- exactly the code path added in the accel patch.
 !
-! Usage: lw_solver_bench [ncol [nlay [ngpt [nreps]]]]
+! Usage: lw_solver_bench [ncol [nlay [ngpt [nreps [mode]]]]]
 !   defaults: ncol=1024 nlay=72 ngpt=256 nreps=10   (rep 1 discarded as warm-up when nreps>1)
+!   mode (accel build only): 0 = resident (default) -- inputs staged on-device once, per-rep
+!         timing is compute-bound; 1 = transfer -- outer data region disabled, so each call
+!         pays its own H2D/D2H round-trip via the kernel's own copyin/copyout. The 0-vs-1 gap
+!         is the PCIe cost the residency design must amortize. (No effect on the CPU build.)
 !
 ! Build twice for the A/B (see the Makefile in this directory):
 !   CPU  : FC=nvfortran FCFLAGS='-O3'                    make -C ../../build librtekernels.a && make
@@ -24,10 +28,12 @@ program lw_solver_bench
 
   integer, parameter :: ik = selected_int_kind(18)
 
-  integer :: ncol, nlay, ngpt, nmus, nreps
+  integer :: ncol, nlay, ngpt, nmus, nreps, mode
   integer :: irep, nargs, denom
   logical(wl) :: top_at_1, do_broadband, do_Jacobians, do_rescaling
+  logical :: resident
   character(len=32) :: arg
+  character(len=8)  :: mode_label
 
   real(wp), allocatable :: Ds(:,:,:), weights(:)
   real(wp), allocatable :: tau(:,:,:), lay_source(:,:,:), lev_source(:,:,:)
@@ -41,7 +47,7 @@ program lw_solver_bench
   real(wp) :: dt, dt_min, dt_sum, mean
 
   ! -------- defaults / CLI --------
-  ncol = 1024 ; nlay = 72 ; ngpt = 256 ; nreps = 10
+  ncol = 1024 ; nlay = 72 ; ngpt = 256 ; nreps = 10 ; mode = 0
   nmus = 1
   top_at_1 = .true. ; do_broadband = .false. ; do_Jacobians = .true. ; do_rescaling = .false.
 
@@ -50,6 +56,10 @@ program lw_solver_bench
   if (nargs >= 2) then ; call get_command_argument(2, arg) ; read(arg,*) nlay  ; end if
   if (nargs >= 3) then ; call get_command_argument(3, arg) ; read(arg,*) ngpt  ; end if
   if (nargs >= 4) then ; call get_command_argument(4, arg) ; read(arg,*) nreps ; end if
+  if (nargs >= 5) then ; call get_command_argument(5, arg) ; read(arg,*) mode  ; end if
+
+  resident   = (mode == 0)
+  mode_label = merge('resident', 'transfer', resident)
 
   ! -------- allocate --------
   allocate(Ds(ncol,ngpt,nmus), weights(nmus))
@@ -80,11 +90,13 @@ program lw_solver_bench
   dt_min = huge(1.0_wp) ; dt_sum = 0.0_wp
 
   ! Outer device-data region (active only in the accel build; plain comments for CPU).
-  ! It stages inputs once so the kernel's own copyin/out find data present -> per-rep
-  ! timing is compute-bound (transfers amortized to region entry/exit, outside the loop).
+  ! When resident (mode 0) it stages inputs once so the kernel's own copyin/out find data
+  ! present -> per-rep timing is compute-bound (transfers amortized outside the loop).
+  ! When mode 1, if(resident)=.false. makes this construct a no-op, so each kernel call does
+  ! its own H2D/D2H -> per-rep timing includes the full PCIe round-trip.
   !$acc data copyin(Ds,weights,tau,lay_source,lev_source,sfc_emis,sfc_src,inc_flux,sfc_srcJac,ssa,g) &
   !$acc      copyout(flux_up,flux_dn,broadband_upJac,flux_upJac) &
-  !$acc      create(broadband_up,broadband_dn)
+  !$acc      create(broadband_up,broadband_dn) if(resident)
   do irep = 1, nreps
     call system_clock(t0)
     call lw_solver_noscat(ncol, nlay, ngpt, top_at_1,           &
@@ -107,9 +119,9 @@ program lw_solver_bench
   denom = merge(nreps - 1, 1, nreps > 1)
   mean  = dt_sum / real(denom, wp)
 
-  write(*,'(a)') '# ncol   nlay ngpt nreps   call_ms_min  call_ms_mean   per_col_us      sum_flux_up       sum_flux_upJac'
-  write(*,'(i8,1x,i4,1x,i4,1x,i5,3x,f12.5,1x,f12.5,1x,f12.5,3x,es16.8,1x,es16.8)') &
-       ncol, nlay, ngpt, nreps, &
+  write(*,'(a)') '# ncol   nlay ngpt nreps  mode      call_ms_min  call_ms_mean   per_col_us      sum_flux_up       sum_flux_upJac'
+  write(*,'(i8,1x,i4,1x,i4,1x,i5,2x,a8,2x,f12.5,1x,f12.5,1x,f12.5,3x,es16.8,1x,es16.8)') &
+       ncol, nlay, ngpt, nreps, mode_label, &
        dt_min*1.0e3_wp, mean*1.0e3_wp, dt_min*1.0e6_wp/real(ncol,wp), &
        sum(flux_up), sum(flux_upJac)
 
