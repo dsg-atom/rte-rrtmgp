@@ -74,6 +74,28 @@ read dynamics' GPU data directly, instead of bouncing it through the CPU, that
 tests the whole idea on real data — without touching the model's core or the
 radiation code yet.
 
+We checked which fields actually cross from dynamics to moisture. There are 13:
+
+    PLE, PREF, ZLE, W, OMEGA, AREA, DTDTDYN, DQVDTDYN,
+    QV_DYN_IN, T_DYN_IN, U_DYN_IN, V_DYN_IN, PLE_DYN_IN
+
+All 13 are the good kind — the model keeps one copy and lets both parts point at
+it (same grid, same precision, same shape on both ends). None are the
+reshaped-or-resized kind that forces a second copy. That was the main risk for
+this step, and it came back clean: a single copy of each field, living on the
+GPU, could serve both the dynamics write and the moisture read.
+
+Two details. The hand-off isn't one wire — it goes through two points (dynamics →
+physics → moisture) because the two parts sit at different depths in the model,
+so the prototype touches two wiring spots instead of one. And one extra field,
+`PHIS`, is passed by a hand-written copy rather than the normal wiring; if the
+prototype needs it, it needs separate handling.
+
+With the reshaped-field risk ruled out, this prototype is on the small end — a
+few days, not weeks. What's left is the two things that don't change: the two
+parts still use two different copies of the hand-off code, and keeping the GPU
+copy alive between the two calls is still the delicate part.
+
 ## Bottom line
 Most of this is plumbing in the hand-off layer, and the model already helps by
 sharing data between neighbors. The two hard, new parts are keeping data across
