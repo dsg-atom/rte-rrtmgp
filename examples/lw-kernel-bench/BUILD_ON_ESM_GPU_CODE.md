@@ -41,9 +41,17 @@ the picture is clean:
   that stops with "not implemented" if Fortran ever hands it data already on the
   GPU. It's a stub for future work, not a feature someone disabled.
 - **No one argued against it.** The pull request that brought this code in (and
-  the later one that merged it to the main line) say nothing about GPU residency
-  — no discussion, no objection, no review comment. It simply wasn't part of the
-  job at the time.
+  the later one that merged it to the main line) say nothing about keeping data
+  on the GPU — no discussion, no objection, no review comment. It simply wasn't
+  part of the job at the time.
+- **There is one related note in the code (a correction to what I said before).**
+  The team left a comment saying they'd like to add a mode that re-checks where
+  the data lives on every call, rather than assume the Fortran side keeps it in
+  one place. It's a wish, not built yet. It's also the *opposite* of what we
+  want: keeping data on the GPU means counting on it staying put. So it isn't a
+  barrier they raised against us — it's the same question, and our answer (for
+  the direct hand-offs) is "yes, it stays put." I earlier called this note
+  unfounded; that was wrong — the note is real, I'd just misread what it meant.
 - **The job at the time was correctness, not speed.** That work was about proving
   the new GPU physics produces the *same numbers* as the old code, with an on/off
   switch to fall back. For checking numbers, copying to the GPU and back is the
@@ -55,12 +63,12 @@ the picture is clean:
   the *Fortran side* (so it owns and passes GPU memory) — which is exactly the
   shared piece we'd be adding, for every component at once.
 
-The takeaway: there's no hidden landmine here. Nobody decided residency was a bad
-idea; it just wasn't needed yet. Turning it on is new work we add on top, not a
-decision of theirs we have to fight.
+The takeaway: there's no hidden landmine here. Nobody decided keeping data on the
+GPU was a bad idea; it just wasn't needed yet. Turning it on is new work we add on
+top, not a decision of theirs we have to fight.
 
 ## Bottom line
 Reuse. The data-handling fix is unavoidable and identical either way, so we
 should do it once — not duplicate a mountain of working code to get to the same
-place. And since residency was never a deliberate "no," building it is additive
-work in a shared layer, not a reversal of anyone's decision.
+place. And since keeping data on the GPU was never a deliberate "no," building it
+is added work in a shared layer, not a reversal of anyone's decision.
