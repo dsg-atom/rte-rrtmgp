@@ -30,17 +30,37 @@ That makes the decision one-sided:
   buys us nothing on the actual problem.
 
 Rewriting would only make sense if their design made keeping data on the GPU
-impossible. It doesn't — the necessary hooks are already in place; the feature
-was simply switched off.
+impossible. It doesn't — the code already anticipates the idea (it has a name
+for "Fortran memory that lives on the GPU"); that path was simply never built.
 
-## The one thing to check first
-The ESM team deliberately turned off "keep data on the GPU," with a note about
-not trusting that the Fortran side keeps its data in the same place between
-steps. So before we build on it, we need to understand *why* they turned it off —
-that tells us how hard turning it back on will be. That's the next question, not
-a reason to start over.
+## Why it isn't built — we checked
+We traced this through the actual code and the pull requests that added it, and
+the picture is clean:
+
+- **It was never turned off — it was never built.** The code has a placeholder
+  that stops with "not implemented" if Fortran ever hands it data already on the
+  GPU. It's a stub for future work, not a feature someone disabled.
+- **No one argued against it.** The pull request that brought this code in (and
+  the later one that merged it to the main line) say nothing about GPU residency
+  — no discussion, no objection, no review comment. It simply wasn't part of the
+  job at the time.
+- **The job at the time was correctness, not speed.** That work was about proving
+  the new GPU physics produces the *same numbers* as the old code, with an on/off
+  switch to fall back. For checking numbers, copying to the GPU and back is the
+  simplest, safest choice. Keeping data resident is a *speed* concern, and speed
+  wasn't the milestone.
+- **The real reason is structural.** The data-handling layer only accepts data
+  that lives on the regular processor, because that is the only kind of data the
+  Fortran model ever hands it. Making data stay on the GPU requires a change on
+  the *Fortran side* (so it owns and passes GPU memory) — which is exactly the
+  shared piece we'd be adding, for every component at once.
+
+The takeaway: there's no hidden landmine here. Nobody decided residency was a bad
+idea; it just wasn't needed yet. Turning it on is new work we add on top, not a
+decision of theirs we have to fight.
 
 ## Bottom line
 Reuse. The data-handling fix is unavoidable and identical either way, so we
 should do it once — not duplicate a mountain of working code to get to the same
-place.
+place. And since residency was never a deliberate "no," building it is additive
+work in a shared layer, not a reversal of anyone's decision.
