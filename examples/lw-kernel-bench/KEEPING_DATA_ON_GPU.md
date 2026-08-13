@@ -52,8 +52,12 @@ unnecessary.
 
 Two things to keep in mind. Steps 1–5 don't need step 6 — that's why it's
 optional; we can prove the whole idea without it. And step 6 changes shared
-infrastructure that all of GEOS depends on, so unlike steps 1–5 it can't go in
-without the maintainers' permission.
+infrastructure that all of GEOS depends on. Unlike steps 1–5, we can't just make
+the change in our own copy and be done: to make it permanent it has to be
+accepted by the team that owns that shared code. That means proposing the change,
+having them review it, and getting their sign-off — because the change affects
+everyone who uses the model, not only us, so they check it won't break other
+groups' work. That's people and calendar time, not just coding.
 
 ## Two things that could bite us
 - The whole plan assumes the model keeps each field in one fixed place while we
