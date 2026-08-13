@@ -39,6 +39,22 @@ happens once at the start and once at the end, instead of over and over.
    biggest change — it touches shared model infrastructure — but it's what makes
    the fix general instead of one-off.
 
+## How step 6 relates to the first five
+Steps 1–5 leave the model's data officially living on the CPU and manage a GPU
+copy on the side — we track which copy is current and sync them at the right
+moments. That gets the speedup, but it's a workaround we babysit field by field.
+
+Step 6 removes the root cause: put the model's data on the GPU in the first
+place, so there's no second copy to track. The sharing-between-neighbors habit
+then hands out GPU data on its own. So step 6 is the clean, general version of
+what steps 1–5 do by hand — it makes step 3 much safer and much of step 2
+unnecessary.
+
+Two things to keep in mind. Steps 1–5 don't need step 6 — that's why it's
+optional; we can prove the whole idea without it. And step 6 changes shared
+infrastructure that all of GEOS depends on, so unlike steps 1–5 it can't go in
+without the maintainers' permission.
+
 ## Two things that could bite us
 - The whole plan assumes the model keeps each field in one fixed place while we
   use it. That holds for direct hand-offs, not for the ones where the model
