@@ -20,11 +20,35 @@ happens once at the start and once at the end, instead of over and over.
   works for direct hand-offs. When the model has to reshape or resize data in
   between, it makes a second copy — those can't be shared without extra work.)
 
+## What the ESM staff built, and what we'd add
+Almost everything that runs on the GPU today is the ESM staff's work, and we
+reuse it as-is:
+- The GPU versions of dynamics and moisture — the actual math — are theirs, and
+  they're still improving them.
+- The hand-off code (all three copies) is theirs.
+- The half-finished hook for accepting data that's already on the GPU is theirs —
+  started, not completed.
+- The bookkeeping layer, and its habit of letting neighbors share one copy, is
+  theirs.
+- The wiring that passes the 13 fields from dynamics to moisture is theirs.
+
+What we'd add is the "keep the data on the GPU" layer that sits on top of all of
+that:
+- The radiation GPU code (we're writing that separately).
+- Every step in the list below — merging the hand-off copies, finishing the
+  device hook, keeping data across calls, wrapping the sequence, connecting
+  radiation, and the optional move of the bookkeeping layer onto the GPU.
+
+We are not rewriting their code. We are adding a layer they left unbuilt.
+
 ## The work, easiest to hardest
+(All of these are new code we add. Each builds on the ESM staff's existing code
+rather than replacing it.)
 1. **Merge the three hand-off codes into one.** Low risk of surprises, but it
    touches dynamics, which already works — so we must be careful not to break it.
 2. **Teach the hand-off code to accept data that's already on the GPU** instead of
-   always copying. The hooks for this are half-built already.
+   always copying. The ESM staff started this hook but didn't finish it; our job
+   is to complete it.
 3. **Let it keep the data across calls instead of re-copying every time.** The
    delicate part: it only works if the model doesn't move the data around behind
    our back, and we must track when a real copy back to the CPU is still needed
@@ -90,6 +114,10 @@ physics → moisture) because the two parts sit at different depths in the model
 so the prototype touches two wiring spots instead of one. And one extra field,
 `PHIS`, is passed by a hand-written copy rather than the normal wiring; if the
 prototype needs it, it needs separate handling.
+
+The GPU dynamics, the GPU moisture, and the wiring that connects them are all the
+ESM staff's existing code. Our new code is small and sits between them: redirect
+the hand-off so moisture reads dynamics' GPU copy instead of a CPU copy.
 
 With the reshaped-field risk ruled out, this prototype is on the small end — a
 few days, not weeks. What's left is the two things that don't change: the two
