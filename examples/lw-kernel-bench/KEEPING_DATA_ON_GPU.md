@@ -42,7 +42,8 @@ happens once at the start and once at the end, instead of over and over.
 ## How step 6 relates to the first five
 Steps 1–5 leave the model's data officially living on the CPU and manage a GPU
 copy on the side — we track which copy is current and sync them at the right
-moments. That gets the speedup, but it's a workaround we babysit field by field.
+moments. That gets the speedup, but it's a workaround we maintain by hand, one
+field at a time.
 
 Step 6 removes the root cause: put the model's data on the GPU in the first
 place, so there's no second copy to track. The sharing-between-neighbors habit
@@ -58,7 +59,7 @@ holding data on the GPU while others still expect it on the CPU — they'd stop
 agreeing on where the data lives. So step 6 only works if every related
 component moves together.
 
-## Two things that could bite us
+## Two risks to watch for
 - The whole plan assumes the model keeps each field in one fixed place while we
   use it. That holds for direct hand-offs, not for the ones where the model
   reshapes data in between.
