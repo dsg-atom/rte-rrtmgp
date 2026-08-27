@@ -6,6 +6,10 @@ back — every time it's called. We want the data to sit on the GPU and stay the
 while dynamics, moisture, and radiation each take a turn. Then the copying
 happens once at the start and once at the end, instead of over and over.
 
+Those three parts are 67% of the run, measured at two grid sizes, and 76% if the
+neighbouring drag and turbulence calculations join them. So the sequence we are
+wrapping covers most of the work. See `WHERE_THE_TIME_GOES.md`.
+
 ## What we found
 - The parts that do the math already keep their working data on the GPU. The
   wasteful copying isn't in the math — it's in the hand-off code that passes data
@@ -55,7 +59,12 @@ rather than replacing it.)
    (to save output, or for parts still running on the CPU). Get this wrong and
    results are silently corrupted.
 4. **Wrap the whole dynamics → moisture → radiation sequence** so the copy happens
-   once at the ends, not between each part.
+   once at the ends, not between each part. One wrinkle: radiation does not run
+   every step. It runs once an hour, while dynamics and moisture run every step —
+   384 times a day at production grid size. So this is really two sequences,
+   dynamics and moisture on every step and radiation joining on one step in
+   sixteen. Decide before building whether radiation's data stays on the GPU
+   through the fifteen steps that don't read it. See `WHERE_THE_TIME_GOES.md`.
 5. **Connect the radiation code, which is a different kind of GPU code** than
    dynamics and moisture. Getting the two kinds to share the same GPU data is the
    newest and riskiest piece.

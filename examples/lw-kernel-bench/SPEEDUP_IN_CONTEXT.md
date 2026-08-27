@@ -8,10 +8,13 @@ the same answers as before, so it is fast without being wrong.
 
 But that speedup applies only to that one piece, and that piece is a small
 part of the whole program. The radiation calculation is about a third of the
-total time GEOS spends running. So even if we made radiation take no time at
-all, the whole program could only get about one and a half times faster. That
-limit is fixed by arithmetic: the two-thirds of the run that isn't radiation
-still has to happen at its normal speed.
+total time GEOS spends running at the coarser grid we first measured, and about
+a quarter at the finer grid used for production work. So even if we made
+radiation take no time at all, the whole program could only get about one and a
+half times faster — nearer 1.4 times at the finer grid. That limit is fixed by
+arithmetic: the rest of the run that isn't radiation still has to happen at its
+normal speed. (`WHERE_THE_TIME_GOES.md` has both measurements, and explains why
+radiation's share fell without radiation getting any cheaper.)
 
 There's a second point that makes the raw number even less impressive on its
 own. We reached almost all of that one-and-a-half-times ceiling just by making
@@ -34,7 +37,8 @@ last two are already being ported by the GEOS-ESM team using the GT4Py/NDSL
 framework, which builds on earlier GT4Py work in the broader modeling community
 (NOAA-GFDL, ETH Zurich's GridTools group, and Ai2, who did the original GT4Py
 port of the FV3 dynamical core). Those three parts together are about
-two-thirds of the total run. If all three run on the GPU and the data stays
+two-thirds of the total run — measured at both grid sizes, so this figure holds
+at production size. If all three run on the GPU and the data stays
 resident on the GPU throughout, so the transfer cost is paid rarely rather than
 constantly, the whole program can realistically run two to three times faster.
 
