@@ -46,6 +46,7 @@
 ! -------------------------------------------------------------------------------------------------
 module mo_rte_lw
   use mo_rte_kind,      only: wp, wl
+  use, intrinsic :: iso_c_binding, only: c_int, c_double
   use mo_rte_config,    only: check_extents, check_values
   use mo_rte_util_array,only: zero_array
   use mo_rte_util_array_validation, & 
@@ -64,6 +65,47 @@ module mo_rte_lw
   private
 
   public :: rte_lw
+
+#ifdef RTE_LW_GPU_OFFLOAD
+  ! GPU longwave no-scattering solver, resolved at link time from librtekernels.so (nvfortran).
+  ! Distinct C name (see rte-kernels/accel/lw_solver_noscat_gpu.F90) so the call binds to the .so,
+  ! not the ifort-compiled copy of rte_lw_solver_noscat in the RRTMGP archive. Flags cross as
+  ! integer(c_int) 1/0 -- the ABI proven bit-faithful by the lw-kernel-bench cross-compiler test.
+  interface
+    subroutine rte_lw_solver_noscat_gpu(ncol, nlay, ngpt, top_at_1, nmus, Ds, weights,       &
+                                        tau, lay_source, lev_source, sfc_emis, sfc_src,      &
+                                        inc_flux, flux_up, flux_dn,                          &
+                                        do_broadband, broadband_up, broadband_dn,            &
+                                        do_Jacobians, sfc_srcJac, broadband_upJac, flux_upJac, &
+                                        do_rescaling, ssa, g) bind(C, name="rte_lw_solver_noscat_gpu")
+      import :: c_int, c_double
+      integer(c_int), intent(in   ) :: ncol, nlay, ngpt
+      integer(c_int), intent(in   ) :: top_at_1
+      integer(c_int), intent(in   ) :: nmus
+      real(c_double), intent(in   ) :: Ds(ncol,ngpt,nmus)
+      real(c_double), intent(in   ) :: weights(nmus)
+      real(c_double), intent(in   ) :: tau(ncol,nlay,ngpt)
+      real(c_double), intent(in   ) :: lay_source(ncol,nlay,ngpt)
+      real(c_double), intent(in   ) :: lev_source(ncol,nlay+1,ngpt)
+      real(c_double), intent(in   ) :: sfc_emis(ncol,ngpt)
+      real(c_double), intent(in   ) :: sfc_src(ncol,ngpt)
+      real(c_double), intent(in   ) :: inc_flux(ncol,ngpt)
+      real(c_double), intent(  out) :: flux_up(ncol,nlay+1,ngpt)
+      real(c_double), intent(  out) :: flux_dn(ncol,nlay+1,ngpt)
+      integer(c_int), intent(in   ) :: do_broadband
+      real(c_double), intent(inout) :: broadband_up(ncol,nlay+1)
+      real(c_double), intent(inout) :: broadband_dn(ncol,nlay+1)
+      integer(c_int), intent(in   ) :: do_Jacobians
+      real(c_double), intent(in   ) :: sfc_srcJac(ncol,ngpt)
+      real(c_double), intent(  out) :: broadband_upJac(ncol,nlay+1)
+      real(c_double), intent(  out) :: flux_upJac(ncol,nlay+1,ngpt)
+      integer(c_int), intent(in   ) :: do_rescaling
+      real(c_double), intent(in   ) :: ssa(ncol,nlay,ngpt)
+      real(c_double), intent(in   ) :: g(ncol,nlay,ngpt)
+    end subroutine rte_lw_solver_noscat_gpu
+  end interface
+#endif
+
 contains
   ! --------------------------------------------------
   !
@@ -355,6 +397,22 @@ contains
               end do
             end do
           end if
+#ifdef RTE_LW_GPU_OFFLOAD
+          call rte_lw_solver_noscat_gpu(ncol, nlay, ngpt,          &
+                                merge(1_c_int,0_c_int,top_at_1), n_quad_angs, &
+                                secants, gauss_wts(1:n_quad_angs,n_quad_angs), &
+                                optical_props%tau,                 &
+                                sources%lay_source,                &
+                                sources%lev_source,                &
+                                sfc_emis_gpt, sources%sfc_source,  &
+                                inc_flux_diffuse,                  &
+                                gpt_flux_up, gpt_flux_dn,          &
+                                merge(1_c_int,0_c_int,do_broadband), flux_up_loc, flux_dn_loc, &
+                                merge(1_c_int,0_c_int,do_Jacobians), sources%sfc_source_Jac, flux_up_Jac_loc, gpt_flux_up_Jac, &
+                                0_c_int,  optical_props%tau, optical_props%tau)
+                                                      ! The last two arguments won't be used since the
+                                                      ! third-to-last is .false. but need valid addresses
+#else
           call lw_solver_noscat(ncol, nlay, ngpt,                 &
                                 logical(top_at_1, wl), n_quad_angs,         &
                                 secants, gauss_wts(1:n_quad_angs,n_quad_angs), &
@@ -369,6 +427,7 @@ contains
                                 logical(.false., wl),  optical_props%tau, optical_props%tau)
                                                       ! The last two arguments won't be used since the
                                                       ! third-to-last is .false. but need valid addresses
+#endif
           !$acc        end data
           !$omp end target data
         class is (ty_optical_props_2str)
@@ -398,6 +457,20 @@ contains
             !
             ! Re-scaled solution to account for scattering
             !
+#ifdef RTE_LW_GPU_OFFLOAD
+            call rte_lw_solver_noscat_gpu(ncol, nlay, ngpt,        &
+                                  merge(1_c_int,0_c_int,top_at_1), n_quad_angs, &
+                                  secants, gauss_wts(1:n_quad_angs,n_quad_angs), &
+                                  optical_props%tau,                 &
+                                  sources%lay_source,                &
+                                  sources%lev_source,                &
+                                  sfc_emis_gpt, sources%sfc_source,  &
+                                  inc_flux_diffuse,                  &
+                                  gpt_flux_up, gpt_flux_dn,          &
+                                  merge(1_c_int,0_c_int,do_broadband), flux_up_loc, flux_dn_loc, &
+                                  merge(1_c_int,0_c_int,do_Jacobians), sources%sfc_source_Jac, flux_up_Jac_loc, gpt_flux_up_Jac, &
+                                  1_c_int,  optical_props%ssa, optical_props%g)
+#else
             call lw_solver_noscat(ncol, nlay, ngpt,                 &
                                   logical(top_at_1, wl), n_quad_angs,         &
                                   secants, gauss_wts(1:n_quad_angs,n_quad_angs), &
@@ -410,6 +483,7 @@ contains
                                   do_broadband, flux_up_loc, flux_dn_loc,     &
                                   logical(do_Jacobians, wl), sources%sfc_source_Jac, flux_up_Jac_loc, gpt_flux_up_Jac, &
                                   logical(.true., wl),  optical_props%ssa, optical_props%g)
+#endif
             !$acc        end data
             !$omp end target data
           endif
