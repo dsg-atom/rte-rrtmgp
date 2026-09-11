@@ -66,6 +66,7 @@ program lw_broadband_test
   end interface
 
   integer(c_int) :: ncol, nlay, ngpt, nmus
+  integer(c_int) :: do_rescaling
   integer :: nargs, mode, cs, ce, ntot, nlev, bad_up, bad_dn, bad_jac
   character(len=32) :: arg
 
@@ -80,13 +81,18 @@ program lw_broadband_test
   real(wp), pointer     :: bb_up(:,:), bb_dn(:,:), bb_jac(:,:)
 
   ! -------- CLI --------
+  ! 6th arg do_rescaling: GEOS passes 1 (ty_optical_props_2str with use_2stream=.false. -> the
+  ! "no-scattering with rescaling" branch, mo_rte_lw.F90:461-472). do_rescaling=1 reads ssa/g on the
+  ! device (kernel line 157-158) and runs lw_transport_1rescl (kernel line 209). Both are untested.
   ncol = 2048_c_int ; nlay = 91_c_int ; ngpt = 128_c_int ; nmus = 1_c_int ; mode = 1
+  do_rescaling = 0_c_int
   nargs = command_argument_count()
   if (nargs >= 1) then ; call get_command_argument(1, arg) ; read(arg,*) ncol ; end if
   if (nargs >= 2) then ; call get_command_argument(2, arg) ; read(arg,*) nlay ; end if
   if (nargs >= 3) then ; call get_command_argument(3, arg) ; read(arg,*) ngpt ; end if
   if (nargs >= 4) then ; call get_command_argument(4, arg) ; read(arg,*) nmus ; end if
   if (nargs >= 5) then ; call get_command_argument(5, arg) ; read(arg,*) mode ; end if
+  if (nargs >= 6) then ; call get_command_argument(6, arg) ; read(arg,*) do_rescaling ; end if
   nlev = nlay + 1
 
   ! -------- inputs (identical synthetic values to the bench/cwrap) --------
@@ -98,8 +104,15 @@ program lw_broadband_test
   allocate(ssa(ncol,nlay,ngpt), g(ncol,nlay,ngpt))
   Ds = 1.66_wp ; weights = 0.5_wp ; tau = 0.1_wp
   lay_source = 2.0_wp ; lev_source = 2.0_wp ; sfc_emis = 0.98_wp ; sfc_src = 5.0_wp
-  inc_flux = 0.0_wp ; sfc_srcJac = 0.05_wp ; ssa = 0.0_wp ; g = 0.0_wp
+  inc_flux = 0.0_wp ; sfc_srcJac = 0.05_wp
   flux_up = 0.0_wp ; flux_dn = 0.0_wp ; flux_upJac = 0.0_wp
+  ! ssa/g are read on the device only when do_rescaling=1. Use realistic non-zero LW cloud values
+  ! (never 1.0 -- kernel comment warns g=ssa=1 gives NaN). With do_rescaling=0 they are unused.
+  if (do_rescaling == 1_c_int) then
+    ssa = 0.5_wp ; g = 0.6_wp
+  else
+    ssa = 0.0_wp ; g = 0.0_wp
+  end if
 
   ! -------- broadband targets --------
   if (mode == 1) then
@@ -119,13 +132,15 @@ program lw_broadband_test
     write(*,'(a)') '# mode 0: CONTIGUOUS broadband targets (control)'
   end if
 
-  ! -------- the model path: do_broadband=1, do_Jacobians=1, do_rescaling=0, top_at_1=1 --------
+  write(*,'(a,i0)') '# do_rescaling = ', do_rescaling
+
+  ! -------- the model path: do_broadband=1, do_Jacobians=1, top_at_1=1; do_rescaling per CLI --------
   call rte_lw_solver_noscat_gpu(ncol, nlay, ngpt, 1_c_int, nmus, Ds, weights, &
                                 tau, lay_source, lev_source, sfc_emis, sfc_src, &
                                 inc_flux, flux_up, flux_dn,                    &
                                 1_c_int, bb_up, bb_dn,                         &
                                 1_c_int, sfc_srcJac, bb_jac, flux_upJac,       &
-                                0_c_int, ssa, g)
+                                do_rescaling, ssa, g)
 
   write(*,'(a)') '# ncol nlay ngpt   sum_broadband_up   sum_broadband_upJac'
   write(*,'(i6,1x,i4,1x,i4,3x,es16.8,1x,es16.8)') ncol, nlay, ngpt, sum(bb_up), sum(bb_jac)

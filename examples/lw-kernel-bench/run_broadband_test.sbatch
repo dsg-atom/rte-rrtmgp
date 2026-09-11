@@ -50,13 +50,26 @@ echo "memcheck (contiguous) exit: $?"
 
 echo ""
 echo "############################################################"
-echo "### (1) do_broadband=1, NON-CONTIGUOUS section targets, model dims"
+echo "### (1) do_broadband=1, NON-CONTIGUOUS section targets, model dims, do_rescaling=0"
 echo "############################################################"
-compute-sanitizer --tool memcheck --print-limit 20 ./lw_bband 2048 91 128 1 1
+compute-sanitizer --tool memcheck --print-limit 20 ./lw_bband 2048 91 128 1 1 0
 echo "memcheck (non-contiguous) exit: $?"
 
 echo ""
+echo "############################################################"
+echo "### (2) GEOS EXACT PATH: do_broadband=1, NON-CONTIGUOUS, do_rescaling=1"
+echo "###     ty_optical_props_2str + use_2stream=.false. -> the rescaling branch"
+echo "###     (mo_rte_lw.F90:461-472). Reads ssa/g on the device -- ssa has NO copyin"
+echo "###     in the kernel (mo_rte_solver_kernels.F90:141 maps g only) -- and runs"
+echo "###     lw_transport_1rescl. Nothing has ever exercised this path."
+echo "############################################################"
+compute-sanitizer --tool memcheck --print-limit 20 ./lw_bband 2048 91 128 1 1 1
+echo "memcheck (rescaling) exit: $?"
+
+echo ""
 echo "=== VERDICT ==="
-echo "memcheck 'Invalid __global__ write' in either run -> OOB in the broadband device path (kernel line named)."
-echo "'GUARD STOMPED' in run (1)             -> device->host copyback overflows the non-contiguous target."
-echo "both CLEAN + GUARD CLEAN               -> broadband path is not the corruption; widen the search."
+echo "memcheck 'Invalid __global__ read'  in run (2) -> ssa read on the device with no copyin"
+echo "                                                  (mo_rte_solver_kernels.F90:157); that is the fix."
+echo "memcheck 'Invalid __global__ write' in any run -> OOB in the device path (kernel line named)."
+echo "'GUARD STOMPED' in run (1) or (2)              -> copyback overflows the non-contiguous target."
+echo "all CLEAN + GUARD CLEAN                         -> rescaling path is clean too; widen further."
