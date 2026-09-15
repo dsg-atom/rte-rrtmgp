@@ -49,10 +49,14 @@ nvfortran --version | head -1
 # mo_rte_kind -> mo_rte_util_array -> mo_rte_solver_kernels(CPU) -> mo_optical_props_kernels(CPU)
 # -> mo_fluxes_broadband_kernels -> lw_solver_noscat_gpu(shim)
 FC=nvfortran
-# EXTRA_FCFLAGS lets a caller append diagnostics without editing this file, e.g.
-#   EXTRA_FCFLAGS="-Mbounds -g" ./build_cpu_so.sh $PWD/cpu_so_bounds   # trap OOB array writes
-#   EXTRA_FCFLAGS="-O0 -g"      ./build_cpu_so.sh $PWD/cpu_so_O0       # indict the optimizer
-FCFLAGS="-O3 -fPIC ${EXTRA_FCFLAGS:-}"
+# OPT overrides the optimization level (default -O3); EXTRA_FCFLAGS appends diagnostics. Keep the
+# opt level in OPT, NOT in EXTRA_FCFLAGS -- appending "-O0" after a hardcoded "-O3" does NOT give
+# -O0: the -O3 turns on -Mvect (auto-vectorizer), which is sticky and forces -O3 back (nvfortran
+# prints "-Mvect forces -O3"). So for a genuine -O0 build, set OPT and also kill vectorization:
+#   OPT="-O0" EXTRA_FCFLAGS="-g -Mnovect" ./build_cpu_so.sh $PWD/cpu_so_O0   # indict the optimizer
+#   EXTRA_FCFLAGS="-Mbounds -g"           ./build_cpu_so.sh $PWD/cpu_so_bounds  # trap OOB (OPT stays -O3)
+OPT="${OPT:--O3}"
+FCFLAGS="$OPT -fPIC ${EXTRA_FCFLAGS:-}"
 MODOUT="-module $OUTDIR"
 
 # The shim lives in accel/ but forwards to whatever mo_rte_solver_kernels module is in scope.
