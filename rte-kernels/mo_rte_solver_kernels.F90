@@ -644,23 +644,23 @@ contains
                                                      tau,        & ! Optical path (tau/mu)
                                                      trans         ! Transmissivity (exp(-tau))
     real(wp), dimension(ncol, nlay+1), intent(in) :: lev_source    ! Planck source at levels (layer edges)
-    real(wp), dimension(ncol, nlay  ), target, & 
+    real(wp), dimension(ncol, nlay  ), &
                                        intent(out):: source_dn, source_up
                                                                    ! Source function at layer edges
                                                                    ! Down at the bottom of the layer, up at the top
     ! --------------------------------
-    real(wp), dimension(:,:), pointer :: source_inc, source_dec 
+    ! source_inc/source_dec were pointers aliased (via a `target` attribute on source_dn/source_up)
+    ! to the output arrays, and written in the icol loop. That target+pointer aliasing defeats
+    ! nvfortran's alias analysis: at -O3 the auto-vectorizer miscompiles the store and overshoots
+    ! into neighbouring memory (confirmed in-model -- -Mnovect and ifort are clean, plain -O3
+    ! corrupts land-tile geometry). Compute both edge sources into scalars and store directly to
+    ! the known-distinct output arrays, branching on top_at_1 -- identical arithmetic, no alias.
+    ! This mirrors the accel `!$acc routine seq` lw_source_noscat, which already has this form.
+    real(wp)            :: source_inc, source_dec
     integer             :: icol, ilay
     real(wp)            :: fact
     real(wp), parameter :: tau_thresh = sqrt(sqrt(epsilon(tau)))
     ! ---------------------------------------------------------------
-    if (top_at_1) then 
-      source_inc => source_dn 
-      source_dec => source_up
-    else
-      source_inc => source_up
-      source_dec => source_dn
-    end if 
     do ilay = 1, nlay
       do icol = 1, ncol
       !
@@ -676,20 +676,27 @@ contains
       !
       ! Equation below is developed in Clough et al., 1992, doi:10.1029/92JD01419, Eq 13
       !
-      source_inc(icol,ilay) = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay+1) + &
-                              2._wp * fact * (lay_source(icol,ilay) - lev_source(icol,ilay+1))
-      source_dec(icol,ilay) = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay ) + &
-                              2._wp * fact * (lay_source(icol,ilay) - lev_source(icol,ilay  ))
+      source_inc = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay+1) + &
+                   2._wp * fact * (lay_source(icol,ilay) - lev_source(icol,ilay+1))
+      source_dec = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay ) + &
+                   2._wp * fact * (lay_source(icol,ilay) - lev_source(icol,ilay  ))
       !
       ! Even better - omit the layer Planck source (not working so well)
       !
-      if(.false.) then 
-        source_inc(icol,ilay) = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay+1) + &
-                                fact * (lev_source(icol,ilay  ) - lev_source(icol,ilay+1))
-        source_dec(icol,ilay) = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay ) + &
-                                fact * (lev_source(icol,ilay+1) - lev_source(icol,ilay  ))
-      end if 
-      end do 
+      if(.false.) then
+        source_inc = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay+1) + &
+                     fact * (lev_source(icol,ilay  ) - lev_source(icol,ilay+1))
+        source_dec = (1._wp - trans(icol,ilay)) * lev_source(icol,ilay ) + &
+                     fact * (lev_source(icol,ilay+1) - lev_source(icol,ilay  ))
+      end if
+      if (top_at_1) then
+        source_dn(icol,ilay) = source_inc
+        source_up(icol,ilay) = source_dec
+      else
+        source_up(icol,ilay) = source_inc
+        source_dn(icol,ilay) = source_dec
+      end if
+      end do
     end do
   end subroutine lw_source_noscat
   ! -------------------------------------------------------------------------------------------------
