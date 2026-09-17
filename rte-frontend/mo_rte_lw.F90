@@ -326,6 +326,17 @@ contains
         ! Broadband fluxes class has three possible outputs; allocate memory for local use
         !   if one or more haven't been requested
         !
+#ifdef RTE_LW_GPU_OFFLOAD
+        ! Offload path: fluxes%flux_* may be a non-contiguous section (GEOS
+        ! points them at flux_up(colS:colE,:) column slices). The device
+        ! copyback below is a contiguous transfer that would overrun a strided
+        ! target into adjacent host memory. Use contiguous local buffers on the
+        ! device, then copy element-wise into fluxes%flux_* on the host
+        ! (stride-respecting) after the copyout.
+        allocate(flux_up_loc(ncol, nlay+1))
+        allocate(flux_dn_loc(ncol, nlay+1))
+        allocate(flux_up_Jac_loc(ncol, nlay+1))
+#else
         if(associated(fluxes%flux_up)) then
           flux_up_loc => fluxes%flux_up
         else
@@ -341,6 +352,7 @@ contains
         else
           allocate(flux_up_Jac_loc(ncol, nlay+1))
         end if
+#endif
         !$acc        enter data create(   flux_up_loc, flux_dn_loc, flux_up_Jac_loc)
         !$omp target enter data map(alloc:flux_up_loc, flux_dn_loc, flux_up_Jac_loc)
       class default
@@ -534,6 +546,13 @@ contains
       type is (ty_fluxes_broadband)
         !$acc        exit data copyout( flux_up_loc, flux_dn_loc, flux_up_Jac_loc)
         !$omp target exit data map(from:flux_up_loc, flux_dn_loc, flux_up_Jac_loc)
+#ifdef RTE_LW_GPU_OFFLOAD
+        ! Contiguous device result -> (possibly strided) GEOS flux sections,
+        ! element-wise on the host so a column-slice target is honored.
+        if(associated(fluxes%flux_up))     fluxes%flux_up(:,:)     = flux_up_loc(:,:)
+        if(associated(fluxes%flux_dn))     fluxes%flux_dn(:,:)     = flux_dn_loc(:,:)
+        if(associated(fluxes%flux_up_Jac)) fluxes%flux_up_Jac(:,:) = flux_up_Jac_loc(:,:)
+#endif
         if(.not. associated(flux_up_loc, fluxes%flux_up)) deallocate(flux_up_loc)
         if(.not. associated(flux_dn_loc, fluxes%flux_dn)) deallocate(flux_dn_loc)
         if(.not. associated(flux_up_Jac_loc, fluxes%flux_up_Jac)) deallocate(flux_up_Jac_loc)
