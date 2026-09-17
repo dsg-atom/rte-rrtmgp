@@ -424,7 +424,9 @@ contains
                                 0_c_int,  optical_props%tau, optical_props%tau)
                                                       ! The last two arguments won't be used since the
                                                       ! third-to-last is .false. but need valid addresses
-          call rte_lw_gpu_canary(1, gpt_flux_up, gpt_flux_dn, do_broadband, flux_up_loc, flux_dn_loc)
+          call rte_lw_gpu_canary(1, gpt_flux_up, gpt_flux_dn, do_broadband, flux_up_loc, flux_dn_loc, &
+                                  optical_props%tau, optical_props%tau, optical_props%tau, &
+                                  sources%lay_source, sources%lev_source, sources%sfc_source, inc_flux_diffuse)
 #else
           call lw_solver_noscat(ncol, nlay, ngpt,                 &
                                 logical(top_at_1, wl), n_quad_angs,         &
@@ -483,7 +485,9 @@ contains
                                   merge(1_c_int,0_c_int,do_broadband), flux_up_loc, flux_dn_loc, &
                                   merge(1_c_int,0_c_int,do_Jacobians), sources%sfc_source_Jac, flux_up_Jac_loc, gpt_flux_up_Jac, &
                                   1_c_int,  optical_props%ssa, optical_props%g)
-            call rte_lw_gpu_canary(2, gpt_flux_up, gpt_flux_dn, do_broadband, flux_up_loc, flux_dn_loc)
+            call rte_lw_gpu_canary(2, gpt_flux_up, gpt_flux_dn, do_broadband, flux_up_loc, flux_dn_loc, &
+                                    optical_props%tau, optical_props%ssa, optical_props%g, &
+                                    sources%lay_source, sources%lev_source, sources%sfc_source, inc_flux_diffuse)
 #else
             call lw_solver_noscat(ncol, nlay, ngpt,                 &
                                   logical(top_at_1, wl), n_quad_angs,         &
@@ -570,16 +574,24 @@ contains
   !                       adjacent host memory (look at copyback / land-tile
   !                       -adjacent flux sections, not the kernel output).
   ! --------------------------------------------------
-  subroutine rte_lw_gpu_canary(call_id, gpt_up, gpt_dn, do_bb, bb_up, bb_dn)
+  subroutine rte_lw_gpu_canary(call_id, gpt_up, gpt_dn, do_bb, bb_up, bb_dn, &
+                               tau, ssa, gasym, lay_src, lev_src, sfc_src, inc_flx)
     use iso_fortran_env, only: error_unit
     integer,                              intent(in) :: call_id
     real(wp), dimension(:,:,:),           intent(in) :: gpt_up, gpt_dn
     logical(wl),                          intent(in) :: do_bb
     real(wp), dimension(:,:), pointer,    intent(in) :: bb_up, bb_dn
-    real(wp), parameter :: phys_max = 1.0e6_wp   ! LW fluxes are O(1e2-1e3) W/m2
-    integer(kind=8)     :: nbad
-    real(wp)            :: mx
-    character(len=16)   :: rankstr
+    ! Inputs to the just-completed solver call, so one run separates "device fed
+    ! garbage inputs" from "device miscomputed good inputs". For call_1 (no
+    ! rescaling) ssa/gasym are the dummy tau addresses, matching the solver call.
+    real(wp), dimension(:,:,:),           intent(in) :: tau, ssa, gasym, lay_src, lev_src
+    real(wp), dimension(:,:),             intent(in) :: sfc_src, inc_flx
+    integer(kind=8)   :: n_gptu, n_gptd, n_bbu, n_bbd
+    integer(kind=8)   :: n_tau, n_ssa, n_g, n_lay, n_lev, n_sfc, n_inc
+    real(wp)          :: m_gptu, m_gptd, m_bbu, m_bbd
+    real(wp)          :: m_tau, m_ssa, m_g, m_lay, m_lev, m_sfc, m_inc
+    character(len=16) :: rankstr
+    logical, save     :: warned_gpt = .false.
 
     rankstr = ''
     call get_environment_variable('PMI_RANK', rankstr)
@@ -587,22 +599,67 @@ contains
     if (len_trim(rankstr)==0) call get_environment_variable('PMIX_RANK', rankstr)
     if (len_trim(rankstr)==0) call get_environment_variable('SLURM_PROCID', rankstr)
 
-    ! NaN: x/=x ; garbage/Inf: |x| over a physical ceiling
-    nbad = count(gpt_up /= gpt_up, kind=8) + count(abs(gpt_up) > phys_max, kind=8) &
-         + count(gpt_dn /= gpt_dn, kind=8) + count(abs(gpt_dn) > phys_max, kind=8)
+    call field_stats(reshape(gpt_up,  [size(gpt_up)]),  n_gptu, m_gptu)
+    call field_stats(reshape(gpt_dn,  [size(gpt_dn)]),  n_gptd, m_gptd)
+    n_bbu = 0_8 ; n_bbd = 0_8 ; m_bbu = 0.0_wp ; m_bbd = 0.0_wp
     if (do_bb) then
-      if (associated(bb_up)) nbad = nbad + count(bb_up /= bb_up, kind=8) + count(abs(bb_up) > phys_max, kind=8)
-      if (associated(bb_dn)) nbad = nbad + count(bb_dn /= bb_dn, kind=8) + count(abs(bb_dn) > phys_max, kind=8)
+      if (associated(bb_up)) call field_stats(reshape(bb_up, [size(bb_up)]), n_bbu, m_bbu)
+      if (associated(bb_dn)) call field_stats(reshape(bb_dn, [size(bb_dn)]), n_bbd, m_bbd)
+    end if
+    call field_stats(reshape(tau,     [size(tau)]),     n_tau, m_tau)
+    call field_stats(reshape(ssa,     [size(ssa)]),     n_ssa, m_ssa)
+    call field_stats(reshape(gasym,   [size(gasym)]),   n_g,   m_g)
+    call field_stats(reshape(lay_src, [size(lay_src)]), n_lay, m_lay)
+    call field_stats(reshape(lev_src, [size(lev_src)]), n_lev, m_lev)
+    call field_stats(reshape(sfc_src, [size(sfc_src)]), n_sfc, m_sfc)
+    call field_stats(reshape(inc_flx, [size(inc_flx)]), n_inc, m_inc)
+
+    ! Print in full only when a CONSUMED output (broadband, copied to GEOS) or an
+    ! INPUT is bad -- those are the values that can actually crash the model. The
+    ! unused g-point arrays (never written back in broadband mode) get one note.
+    if (n_bbu + n_bbd + n_tau + n_ssa + n_g + n_lay + n_lev + n_sfc + n_inc > 0_8) then
+      write(error_unit,'(a,a,a,i0)') '[LW-CANARY] rank=', trim(rankstr), ' call=', call_id
+      write(error_unit,'(a,i0,a,es12.4,a,i0,a,es12.4)') &
+        '  CONSUMED bb_up bad=', n_bbu, ' max=', m_bbu, '  bb_dn bad=', n_bbd, ' max=', m_bbd
+      write(error_unit,'(a,i0,a,es12.4,a,i0,a,es12.4,a,i0,a,es12.4)') &
+        '  INPUT    tau bad=', n_tau, ' max=', m_tau, '  ssa bad=', n_ssa, ' max=', m_ssa, &
+        '  g bad=', n_g, ' max=', m_g
+      write(error_unit,'(a,i0,a,es12.4,a,i0,a,es12.4,a,i0,a,es12.4,a,i0,a,es12.4)') &
+        '  INPUT    lay bad=', n_lay, ' max=', m_lay, '  lev bad=', n_lev, ' max=', m_lev, &
+        '  sfc bad=', n_sfc, ' max=', m_sfc, '  inc bad=', n_inc, ' max=', m_inc
+      write(error_unit,'(a,i0,a,es12.4,a,i0,a,es12.4)') &
+        '  UNUSED   gpt_up bad=', n_gptu, ' max=', m_gptu, '  gpt_dn bad=', n_gptd, ' max=', m_gptd
+      flush(error_unit)
+    else if (n_gptu + n_gptd > 0_8 .and. .not. warned_gpt) then
+      write(error_unit,'(a,a,a,i0,a)') '[LW-CANARY] rank=', trim(rankstr), ' call=', call_id, &
+        ' : g-point-only garbage (device does not write g-point flux in broadband mode; unused) -- CONSUMED fluxes + INPUTS clean'
+      flush(error_unit)
+      warned_gpt = .true.
     end if
 
-    if (nbad > 0_8) then
-      ! maxabs of the finite g-point values, so the print itself never trips on NaN
-      mx = maxval(abs(gpt_up), mask=(gpt_up==gpt_up))
-      write(error_unit,'(a,a,a,i0,a,i0,a,es12.4)') &
-        '[LW-CANARY] rank=', trim(rankstr), ' call=', call_id, &
-        ' bad_values=', nbad, ' maxabs_finite=', mx
-      flush(error_unit)
-    end if
+  contains
+    ! Count NaN (x/=x) + |x|>1e6 (LW fluxes are O(1e2-1e3)); report max finite magnitude.
+    subroutine field_stats(x, nbad, mx)
+      real(wp),        intent(in)  :: x(:)
+      integer(kind=8), intent(out) :: nbad
+      real(wp),        intent(out) :: mx
+      real(wp), parameter :: phys_max = 1.0e6_wp
+      integer  :: i
+      real(wp) :: ax
+      nbad = 0_8 ; mx = 0.0_wp
+      do i = 1, size(x)
+        if (x(i) /= x(i)) then
+          nbad = nbad + 1_8
+        else
+          ax = abs(x(i))
+          if (ax > phys_max) then
+            nbad = nbad + 1_8
+          else if (ax > mx) then
+            mx = ax
+          end if
+        end if
+      end do
+    end subroutine field_stats
   end subroutine rte_lw_gpu_canary
 #endif
   !--------------------------------------------------------------------------------------------------------------------
