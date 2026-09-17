@@ -412,6 +412,7 @@ contains
                                 0_c_int,  optical_props%tau, optical_props%tau)
                                                       ! The last two arguments won't be used since the
                                                       ! third-to-last is .false. but need valid addresses
+          call rte_lw_gpu_canary(1, gpt_flux_up, gpt_flux_dn, do_broadband, flux_up_loc, flux_dn_loc)
 #else
           call lw_solver_noscat(ncol, nlay, ngpt,                 &
                                 logical(top_at_1, wl), n_quad_angs,         &
@@ -470,6 +471,7 @@ contains
                                   merge(1_c_int,0_c_int,do_broadband), flux_up_loc, flux_dn_loc, &
                                   merge(1_c_int,0_c_int,do_Jacobians), sources%sfc_source_Jac, flux_up_Jac_loc, gpt_flux_up_Jac, &
                                   1_c_int,  optical_props%ssa, optical_props%g)
+            call rte_lw_gpu_canary(2, gpt_flux_up, gpt_flux_dn, do_broadband, flux_up_loc, flux_dn_loc)
 #else
             call lw_solver_noscat(ncol, nlay, ngpt,                 &
                                   logical(top_at_1, wl), n_quad_angs,         &
@@ -537,6 +539,53 @@ contains
         if(.not. associated(flux_up_Jac_loc, fluxes%flux_up_Jac)) deallocate(flux_up_Jac_loc)
     end select
   end function rte_lw
+
+#ifdef RTE_LW_GPU_OFFLOAD
+  ! --------------------------------------------------
+  ! Host-side canary for the GPU offload path.
+  ! Scans the arrays the device kernel just wrote for NaN and non-physical
+  ! magnitudes. Prints ONLY when a bad value is found (silent when clean),
+  ! tagged with MPI rank and call site. At the 22:00 fault this separates:
+  !   bad_values > 0  -> the device returned garbage flux values
+  !   silent          -> returned values are fine; a stray write stomped
+  !                       adjacent host memory (look at copyback / land-tile
+  !                       -adjacent flux sections, not the kernel output).
+  ! --------------------------------------------------
+  subroutine rte_lw_gpu_canary(call_id, gpt_up, gpt_dn, do_bb, bb_up, bb_dn)
+    use iso_fortran_env, only: error_unit
+    integer,                              intent(in) :: call_id
+    real(wp), dimension(:,:,:),           intent(in) :: gpt_up, gpt_dn
+    logical(wl),                          intent(in) :: do_bb
+    real(wp), dimension(:,:), pointer,    intent(in) :: bb_up, bb_dn
+    real(wp), parameter :: phys_max = 1.0e6_wp   ! LW fluxes are O(1e2-1e3) W/m2
+    integer(kind=8)     :: nbad
+    real(wp)            :: mx
+    character(len=16)   :: rankstr
+
+    rankstr = ''
+    call get_environment_variable('PMI_RANK', rankstr)
+    if (len_trim(rankstr)==0) call get_environment_variable('OMPI_COMM_WORLD_RANK', rankstr)
+    if (len_trim(rankstr)==0) call get_environment_variable('PMIX_RANK', rankstr)
+    if (len_trim(rankstr)==0) call get_environment_variable('SLURM_PROCID', rankstr)
+
+    ! NaN: x/=x ; garbage/Inf: |x| over a physical ceiling
+    nbad = count(gpt_up /= gpt_up, kind=8) + count(abs(gpt_up) > phys_max, kind=8) &
+         + count(gpt_dn /= gpt_dn, kind=8) + count(abs(gpt_dn) > phys_max, kind=8)
+    if (do_bb) then
+      if (associated(bb_up)) nbad = nbad + count(bb_up /= bb_up, kind=8) + count(abs(bb_up) > phys_max, kind=8)
+      if (associated(bb_dn)) nbad = nbad + count(bb_dn /= bb_dn, kind=8) + count(abs(bb_dn) > phys_max, kind=8)
+    end if
+
+    if (nbad > 0_8) then
+      ! maxabs of the finite g-point values, so the print itself never trips on NaN
+      mx = maxval(abs(gpt_up), mask=(gpt_up==gpt_up))
+      write(error_unit,'(a,a,a,i0,a,i0,a,es12.4)') &
+        '[LW-CANARY] rank=', trim(rankstr), ' call=', call_id, &
+        ' bad_values=', nbad, ' maxabs_finite=', mx
+      flush(error_unit)
+    end if
+  end subroutine rte_lw_gpu_canary
+#endif
   !--------------------------------------------------------------------------------------------------------------------
   !
   ! Expand from band to g-point dimension, transpose dimensions (nband, ncol) -> (ncol,ngpt)
