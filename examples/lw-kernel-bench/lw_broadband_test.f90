@@ -68,6 +68,7 @@ program lw_broadband_test
   integer(c_int) :: ncol, nlay, ngpt, nmus
   integer(c_int) :: do_rescaling
   integer :: nargs, mode, cs, ce, ntot, nlev, bad_up, bad_dn, bad_jac
+  integer :: icol, ilay, igpt
   character(len=32) :: arg
 
   real(wp), allocatable :: Ds(:,:,:), weights(:)
@@ -102,14 +103,41 @@ program lw_broadband_test
   allocate(flux_up(ncol,nlev,ngpt), flux_dn(ncol,nlev,ngpt))
   allocate(sfc_srcJac(ncol,ngpt), flux_upJac(ncol,nlev,ngpt))
   allocate(ssa(ncol,nlay,ngpt), g(ncol,nlay,ngpt))
-  Ds = 1.66_wp ; weights = 0.5_wp ; tau = 0.1_wp
-  lay_source = 2.0_wp ; lev_source = 2.0_wp ; sfc_emis = 0.98_wp ; sfc_src = 5.0_wp
+  Ds = 1.66_wp ; weights = 0.5_wp
+  sfc_emis = 0.98_wp ; sfc_src = 5.0_wp
   inc_flux = 0.0_wp ; sfc_srcJac = 0.05_wp
   flux_up = 0.0_wp ; flux_dn = 0.0_wp ; flux_upJac = 0.0_wp
-  ! ssa/g are read on the device only when do_rescaling=1. Use realistic non-zero LW cloud values
-  ! (never 1.0 -- kernel comment warns g=ssa=1 gives NaN). With do_rescaling=0 they are unused.
+  ! SPATIALLY-VARYING, physically-plausible inputs. The clean bench used UNIFORM tau=0.1,
+  ! ssa=0.5, g=0.6 -- the model feeds the device rescaling path non-uniform optical properties
+  ! that span the physical box. A device-codegen miscompute can be value-range sensitive, so
+  ! sweep the box deterministically (index hashes, reproducible): tau in [1e-3, ~12],
+  ! ssa in [0, 0.7], g in [0, 0.85] -- never 1.0 (kernel comment: g=ssa=1 gives NaN).
+  do igpt = 1, ngpt
+    do ilay = 1, nlay
+      do icol = 1, ncol
+        tau(icol,ilay,igpt)        = 1.0e-3_wp + 12.0_wp * &
+             real(mod(icol*7 + ilay*13 + igpt*3, 100), wp) / 100.0_wp
+        lay_source(icol,ilay,igpt) = 1.0_wp + 4.0_wp * real(ilay, wp) / real(nlay, wp)
+      end do
+    end do
+  end do
+  do igpt = 1, ngpt
+    do ilay = 1, nlev
+      do icol = 1, ncol
+        lev_source(icol,ilay,igpt) = 1.0_wp + 4.0_wp * real(ilay, wp) / real(nlev, wp)
+      end do
+    end do
+  end do
+  ! ssa/g are read on the device only when do_rescaling=1. With do_rescaling=0 they are unused.
   if (do_rescaling == 1_c_int) then
-    ssa = 0.5_wp ; g = 0.6_wp
+    do igpt = 1, ngpt
+      do ilay = 1, nlay
+        do icol = 1, ncol
+          ssa(icol,ilay,igpt) = 0.70_wp * real(mod(icol*3 + ilay*5  + igpt*2, 100), wp) / 100.0_wp
+          g  (icol,ilay,igpt) = 0.85_wp * real(mod(icol*2 + ilay*11 + igpt*7, 100), wp) / 100.0_wp
+        end do
+      end do
+    end do
   else
     ssa = 0.0_wp ; g = 0.0_wp
   end if
@@ -145,6 +173,19 @@ program lw_broadband_test
   write(*,'(a)') '# ncol nlay ngpt   sum_broadband_up   sum_broadband_upJac'
   write(*,'(i6,1x,i4,1x,i4,3x,es16.8,1x,es16.8)') ncol, nlay, ngpt, sum(bb_up), sum(bb_jac)
 
+  ! -------- VALUE scan (what memcheck and the sums cannot see) --------
+  ! The in-model canary flagged NaN + |flux|>1e6 (values up to 2.1e30) on this exact call.
+  ! compute-sanitizer catches only bad MEMORY access, and a sum can mask cancellation, so scan
+  ! every returned array for NaN / |x|>1e6 and report the max finite magnitude. A nonzero count
+  ! here reproduces the in-model device miscompute on a single GPU.
+  write(*,'(a)') '# --- value scan: NaN / |x|>1e6 / max finite magnitude ---'
+  call scan_values('flux_up   ', reshape(flux_up,    [size(flux_up)]))
+  call scan_values('flux_dn   ', reshape(flux_dn,    [size(flux_dn)]))
+  call scan_values('flux_upJac', reshape(flux_upJac, [size(flux_upJac)]))
+  call scan_values('bb_up     ', reshape(bb_up,      [size(bb_up)]))
+  call scan_values('bb_dn     ', reshape(bb_dn,      [size(bb_dn)]))
+  call scan_values('bb_jac    ', reshape(bb_jac,     [size(bb_jac)]))
+
   if (mode == 1) then
     ! count guard elements OUTSIDE the intended section that were overwritten (should be ZERO)
     bad_up  = count(big_up  /= SENT) - count(bb_up  /= SENT)
@@ -158,4 +199,33 @@ program lw_broadband_test
       write(*,'(a)') 'GUARD STOMPED: device->host copyback wrote OUTSIDE the section == corruption.'
     end if
   end if
+
+contains
+
+  ! Scan a flattened field for the same garbage the in-model canary looks for:
+  ! NaN (x/=x) and |x|>1e6 (real LW fluxes are ~1e2). Report the max finite magnitude.
+  subroutine scan_values(label, x)
+    character(len=*), intent(in) :: label
+    real(wp),         intent(in) :: x(:)
+    integer  :: i, nnan, nhuge
+    real(wp) :: mx, ax
+    nnan = 0 ; nhuge = 0 ; mx = 0.0_wp
+    do i = 1, size(x)
+      if (x(i) /= x(i)) then
+        nnan = nnan + 1
+      else
+        ax = abs(x(i))
+        if (ax > 1.0e6_wp) then
+          nhuge = nhuge + 1
+        else if (ax > mx) then
+          mx = ax
+        end if
+      end if
+    end do
+    write(*,'(a,a,a,i0,a,i0,a,es12.4)') '# scan ', label, ' : NaN=', nnan, &
+          '  |x|>1e6=', nhuge, '  maxabs_finite=', mx
+    if (nnan > 0 .or. nhuge > 0) &
+      write(*,'(a,a,a)') 'VALUE GARBAGE in ', label, ' -- device miscompute reproduced.'
+  end subroutine scan_values
+
 end program lw_broadband_test
